@@ -1,0 +1,75 @@
+---
+title: "Quiz1"
+author: "Shahyar Taheri"
+date: "January 14, 2019"
+output: html_document
+---
+
+# Introduction  
+
+```{r, echo=FALSE, warning=FALSE, results='hide'}
+# Text proccessing libraries
+library(tm);library(stringi);
+# Plotting libraries
+library(ggplot2);
+```
+
+## Loading the dataset 
+
+Download and unzip the data file.
+
+```{r, warning=FALSE, results='hide'}
+if (!file.exists("assets/raw_data.zip")){
+  download.file(url = "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip", 
+                destfile = "assets/raw_data.zip", quiet = FALSE, method="auto")}
+if (!file.exists("assets/rawdata")){
+  unzip(zipfile = "assets/raw_data.zip", exdir = "assets", overwrite = TRUE)
+}
+res = file.rename("assets/final","assets/rawdata")
+```
+
+Read the datasets:
+
+```{r, warning=FALSE, cache=TRUE}
+LANGUAGE = 'en_US' # ('de_DE','en_US','fi_FI','ru_RU')
+SOURCE = 'blogs' # ('blogs','news','twitter')
+
+rdata.blogs = readLines("assets/rawdata/en_US/en_US.blogs.txt", encoding = 'UTF-8', skipNul = TRUE)
+rdata.news = readLines("assets/rawdata/en_US/en_US.news.txt", encoding = 'UTF-8', skipNul = TRUE)
+rdata.twitter = readLines("assets/rawdata/en_US/en_US.twitter.txt", encoding = 'UTF-8', skipNul = TRUE)
+```
+
+Get general file stats
+
+```{r, cache=TRUE}
+# Get general file stat
+blogs.stat = stri_stats_general(rdata.blogs)
+news.stat = stri_stats_general(rdata.news)
+twitter.stat = stri_stats_general(rdata.twitter)
+stat = data.frame(blogs.stat, news.stat, twitter.stat)
+colnames(stat)= c('Blogs','News','Twitter')
+
+sizeMB = c(format(object.size(rdata.blogs), units="MB"), format(object.size(rdata.news), units="MB"),
+            format(object.size(rdata.twitter), units="MB"))
+longestLine = c(max(nchar(rdata.blogs)),max(nchar(rdata.news)),max(nchar(rdata.twitter))) 
+```
+
+```{r}
+knitr::kable(rbind(FileSize=sizeMB, stat, CharsLongestLine=longestLine))
+```
+
+Question 4: 
+```{r}
+lovec = grepl(".love.", rdata.twitter, ignore.case = FALSE)
+hatec = grepl(".hate.", rdata.twitter, ignore.case = FALSE)
+round(sum(lovec)/sum(hatec))
+```
+Question 5:
+
+```{r}
+rdata.twitter[grepl("biostats", rdata.twitter, ignore.case = FALSE)]
+```
+
+```{r}
+sum(grepl("A computer once beat me at chess, but it was no match for me at kickboxing", rdata.twitter, ignore.case = FALSE))
+```

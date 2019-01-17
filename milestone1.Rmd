@@ -1,0 +1,234 @@
+---
+title: "Natural Language Processing: Word Prediction"
+author: "Shahyar Taheri"
+date: "December 2018"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+---
+
+# Introduction  
+
+The objective of this project is to create a NLP prediction model that can guess the next word as user is typing. The prediction model should provide the top choices with the highest probability given the previous words and context of the sentence. The final data product will be a shiny app that let user interact with the prediction model. 
+
+The [training data](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip) used in this project are corpora that are collected from publicly available sources by a web crawler. The crawler checks for the language, to mainly get texts consisting of the desired language. Each entry is tagged with it's date of publication. Where user comments are included they will be tagged with the date of the main entry. The data is parsed further to remove duplicate entries and split into individual lines. The final dataset contains documents in German, English, French, and Russian which are divided into `blogs`, `news`, and `twitter` source files.  
+
+## Setup
+
+Setup the workspace and import the required libraries.
+
+```{r, message=FALSE, warning=FALSE}
+# Data processing 
+library(dplyr); library(data.table)
+# Text proccessing libraries
+library(tm);library(stringi);library(tidytext)
+# Plotting libraries
+library(ggplot2);library(wordcloud);library(ggwordcloud);
+# Performance Optimization
+library(parallel);library(doParallel)
+
+jobcluster = makeCluster(detectCores())
+invisible(clusterEvalQ(jobcluster, library(tm)))
+invisible(clusterEvalQ(jobcluster, library(stringi)))
+invisible(clusterEvalQ(jobcluster, library(wordcloud)))
+```
+
+## Loading the dataset 
+
+Download and unzip the data file.
+
+```{r, warning=FALSE, results='hide'}
+# Download data
+if (!file.exists("assets/raw_data.zip")){
+  download.file(url = "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip", 
+                destfile = "assets/raw_data.zip", quiet = FALSE, method="auto")}
+
+# Unzip the data
+if (!file.exists("assets/rawdata")){
+  unzip(zipfile = "assets/raw_data.zip", exdir = "assets", overwrite = TRUE)
+}
+res = file.rename("assets/final","assets/rawdata")
+```
+
+Read the datasets:
+
+```{r, warning=FALSE, cache=TRUE}
+LANGUAGE = 'en_US' # ('de_DE','en_US','fi_FI','ru_RU')
+SOURCES = c('blogs','news','twitter')
+
+rdata = list()
+for (src in SOURCES){
+  path = file.path("assets/rawdata", LANGUAGE, paste(LANGUAGE,".",src,".txt",sep = "") )
+  rdata[[src]] = readLines(path, encoding = 'UTF-8', skipNul = TRUE)
+}
+
+```
+
+Get general file statistics:
+
+```{r, cache=TRUE}
+# Get general file stat
+blogs.stat = stri_stats_general(rdata$blogs)
+news.stat = stri_stats_general(rdata$news)
+twitter.stat = stri_stats_general(rdata$twitter)
+stat = data.frame(blogs.stat, news.stat, twitter.stat)
+colnames(stat)= c('Blogs','News','Twitter')
+
+sizeMB = c(format(object.size(rdata$blogs), units="MB"), format(object.size(rdata$news), units="MB"),
+            format(object.size(rdata$twitter), units="MB"))
+longestLine = c(max(nchar(rdata$blogs)),max(nchar(rdata$news)),max(nchar(rdata$twitter))) 
+```
+
+Data files summary: 
+
+```{r}
+knitr::kable(rbind(FileSize=sizeMB, stat, CharsLongestLine=longestLine),caption="Summary of data sources")
+```
+
+# Preprocessing 
+
+## Resampling
+
+There are more than 3 millions lines in the English dataset. To increase the code performance, the files are sampled into smaller chunks.
+
+```{r, warning=FALSE, cache=TRUE}
+set.seed( 1234 ); df.blogs  <- sample(rdata$blogs,   0.1 * length(rdata$blogs)) 
+set.seed( 1234 ); df.tweets <- sample(rdata$twitter, 0.1 * length(rdata$twitter))
+set.seed( 1234 ); df.news   <- sample(rdata$news,    0.1 * length(rdata$news))
+```
+
+The data preprocessing is done using the text mining package `tm`.
+
+## Corpus creation
+
+```{r, warning=FALSE, cache=TRUE}
+corpus = VCorpus(VectorSource(c(df.blogs,df.tweets,df.news)))
+rm(df.blogs);rm(df.news);rm(df.tweets)
+```
+
+## Data cleanup
+
+The data was transformed by removing special characters, punctuations, numbers, and stripping white spaces.
+
+Considerations:
+
+- No stemming was performed during cleanup. The stemming can improve the predictions by removing the training dataset dimensionality and increasing the frequency of certain words. However, as the word prefix are excluded, the predictions will be nonintuitive. 
+
+
+```{r, warning=FALSE, cache=TRUE}
+# Helper functions
+removeURL <- function(x) gsub("http:[[:alnum:]]*", "", x)
+removeHashTags <- function(x) gsub("#\\S+", "", x)
+removeTwitterHandles <- function(x) gsub("@\\S+", "", x)
+removeSpecialChars <- function(x) gsub("[^a-zA-Z0-9 ]","",x)
+
+# Remove handles and hashtags
+corpus["en_US.twitter.txt"] = tm_map(corpus["en_US.twitter.txt"], removeHashTags)
+corpus["en_US.twitter.txt"] = tm_map(corpus["en_US.twitter.txt"], removeTwitterHandles)
+
+# Remove URLs
+text.corpus = tm_map(corpus, removeURL)
+
+# remove special characters
+corpus =  tm_map(corpus, removeSpecialChars)
+
+# convert to lowercase
+corpus = tm_map(corpus, tolower)
+
+# remove punctuation
+corpus = tm_map(corpus, removePunctuation)
+
+# remove numbers
+corpus = tm_map(corpus, removeNumbers)
+
+# strip whitespace
+corpus = tm_map(corpus, stripWhitespace)
+
+```
+
+## Remove profanity
+
+The profanity words are excluded based on the following [dataset](http://www.bannedwordlist.com/lists/swearWords.txt).
+
+```{r, warning=FALSE, cache=TRUE}
+# Get profanity dataset
+if (!file.exists("assets/profanity.txt")){
+  download.file(url = "http://www.bannedwordlist.com/lists/swearWords.txt", 
+                destfile = "assets/profanity.txt", quiet = FALSE, method="auto")}
+profanity = readLines("assets/profanity.txt", encoding = 'UTF-8', skipNul = TRUE)
+corpus = tm_map(corpus, removeWords, profanity) 
+corpus = tm_map(corpus, PlainTextDocument)
+```
+
+# Exploratory data analysis
+
+## Sentence length 
+
+```{r, warning=FALSE, cache=TRUE}
+tidy.text = as.character(unlist(sapply(corpus,`[`,"content")))
+
+hist(stri_count(tidy.text,regex="\\S+"),breaks=50,col="steelblue",xlab="Words",main="Sentence Length (in Words)")
+```
+
+## Tokenizer 
+
+The corpus is transformed into multiple term document matrices based on the order of the n-grams.
+
+```{r, warning=FALSE, cache=TRUE}
+ngrams = list();
+for(i in 1:4) {
+  print(paste0("Extracting", " ", i, "-grams from corpus"))
+  tokens = function(x) unlist(lapply(ngrams(words(x), i), paste, collapse = " "), use.names = FALSE)
+  TDM = TermDocumentMatrix(corpus, control = list(tokenize = tokens))
+  TDM = sort(slam::row_sums(TDM, na.rm = T), decreasing=TRUE)
+  TDM = data.table(token = names(TDM), count = unname(TDM), type=paste0("ngram",i)) 
+  TDM = subset(TDM, count>1)
+  ngrams[[i]]=TDM
+}
+```
+
+## Word clouds
+
+```{r}
+bind_rows(ngrams) %>%
+  filter(count >10) %>%
+  group_by(type) %>%
+  slice(1:50) %>%
+  mutate(prop = count / sum(count))%>%
+  ggplot(aes(label = token, size = (prop-mean(prop))/sqrt(mean(prop)),
+             color = factor(sample.int(10, 200, replace = TRUE)))) +
+  geom_text_wordcloud_area() +
+  scale_size_area(max_size = 30) +
+  theme_minimal() +
+  facet_wrap(~type, scale="free")
+```
+
+## Word histograms 
+
+```{r}
+bind_rows(ngrams) %>%
+  filter(count >10) %>%
+  group_by(type) %>%
+  slice(1:10) %>%
+  ggplot(aes(reorder(token,-count),log10(count))) +
+  geom_bar(stat = "identity", fill="steelblue", width = 0.4) +
+  ggtitle("Ngrams") +
+  xlab("Tokens") + ylab("Frequency (Log10)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  facet_grid(~type, scales = "free")
+```
+
+# Conclusions
+
+The three corpora from US English text were used for analysis. Due to the large size of the combined corpus, data was down sampled for faster processing. Next, multiple transformations were applied to the to remove unwanted characters, words, numbers, white spaces, punctuations, URLs, hashtags, etc. The resulting corpus was tokenized using 1-4 Ngrams, and exploratory analysis was done to study the distribution of unigrams, bigrams, trigrams, and four-grams in the dataset. 
+
+# Future plans
+
+1. Work on the pre-processing script to make it more performant using multi-processing corpus transformations.
+2. Study the performance of different prediction models including N-grams, Naive-Bayes, and Neural Networks (CNN and RNN architectures).
+3. Create a shiny app that predict next word as user is typing. The interface should be fast and intuitive to create a pleasant experience.
+
